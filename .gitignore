@@ -1,6 +1,8 @@
 # data
 data/raw/*
 !data/raw/.gitkeep
+data/landing/
+data/.simulator_state.json
 
 # env
 .env

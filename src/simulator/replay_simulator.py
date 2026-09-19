@@ -11,12 +11,19 @@ Landing target:
     which is useful for testing the simulator itself before a workspace
     is wired up.
 
+Position tracking:
+  - The simulator remembers how many rows it has already emitted in
+    `data/.simulator_state.json`, so stopping and restarting the script
+    continues from where it left off instead of re-reading the file from
+    the beginning. Use --reset to intentionally start over.
+
 Run: python -m src.simulator.replay_simulator
 """
 
 from __future__ import annotations
 
 import io
+import json
 import logging
 import os
 import time
@@ -39,6 +46,18 @@ DATABRICKS_HOST = os.environ.get("DATABRICKS_HOST")
 DATABRICKS_TOKEN = os.environ.get("DATABRICKS_TOKEN")
 
 LOCAL_LANDING_DIR = Path("data/landing")
+STATE_PATH = Path("data/.simulator_state.json")
+
+
+def _load_state() -> dict:
+    if STATE_PATH.exists():
+        return json.loads(STATE_PATH.read_text())
+    return {"rows_emitted": 0, "batch_index": 0}
+
+
+def _save_state(state: dict) -> None:
+    STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    STATE_PATH.write_text(json.dumps(state))
 
 
 def _get_databricks_client():
@@ -72,7 +91,7 @@ def _emit_batch(client, batch: pd.DataFrame, batch_index: int) -> None:
         logger.info("Wrote batch %d (%d rows) -> %s (local fallback)", batch_index, len(batch), local_path)
 
 
-def run(loop: bool = False) -> None:
+def run(loop: bool = False, reset: bool = False) -> None:
     csv_path = Path(PAYSIM_CSV_PATH)
     if not csv_path.exists():
         raise FileNotFoundError(
@@ -80,6 +99,14 @@ def run(loop: bool = False) -> None:
             "(dataset 'ealaxi/paysim1') and place it there, or set "
             "PAYSIM_CSV_PATH in your .env."
         )
+
+    if reset and STATE_PATH.exists():
+        STATE_PATH.unlink()
+        logger.info("Reset requested — cleared saved position, starting from row 1.")
+
+    state = _load_state()
+    rows_already_emitted = state["rows_emitted"]
+    batch_index = state["batch_index"]
 
     client = _get_databricks_client()
     if client is None:
@@ -90,24 +117,29 @@ def run(loop: bool = False) -> None:
         )
 
     logger.info(
-        "Starting replay: batch_size=%d interval=%ss source=%s",
+        "Starting replay: batch_size=%d interval=%ss source=%s resuming_after_row=%d",
         BATCH_SIZE,
         BATCH_INTERVAL_SECONDS,
         csv_path,
+        rows_already_emitted,
     )
 
-    batch_index = 0
     while True:
-        reader = pd.read_csv(csv_path, chunksize=BATCH_SIZE)
+        skiprows = range(1, rows_already_emitted + 1) if rows_already_emitted else None
+        reader = pd.read_csv(csv_path, chunksize=BATCH_SIZE, skiprows=skiprows)
         for batch in reader:
             _emit_batch(client, batch, batch_index)
+            rows_already_emitted += len(batch)
             batch_index += 1
+            _save_state({"rows_emitted": rows_already_emitted, "batch_index": batch_index})
             time.sleep(BATCH_INTERVAL_SECONDS)
         if not loop:
             break
         logger.info("Reached end of source data, looping back to start.")
+        rows_already_emitted = 0
+        _save_state({"rows_emitted": rows_already_emitted, "batch_index": batch_index})
 
-    logger.info("Replay finished after %d batches.", batch_index)
+    logger.info("Replay finished after %d batches (%d total rows emitted).", batch_index, rows_already_emitted)
 
 
 if __name__ == "__main__":
@@ -120,9 +152,14 @@ if __name__ == "__main__":
         help="Restart from the beginning of the CSV when it's exhausted, "
         "instead of stopping.",
     )
+    parser.add_argument(
+        "--reset",
+        action="store_true",
+        help="Ignore any saved position and start from row 1 of the CSV.",
+    )
     args = parser.parse_args()
 
     try:
-        run(loop=args.loop)
+        run(loop=args.loop, reset=args.reset)
     except KeyboardInterrupt:
-        logger.info("Stopped by user.")
+        logger.info("Stopped by user — position saved, next run will resume from here.")
