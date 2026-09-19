@@ -18,3 +18,20 @@ Week 2 complete.
 - Derived `event_time` from PaySim's `step` field (hours since simulation start) rather than using `_ingested_at`, so velocity windows reflect the transaction's own simulated time, not simulator/wall-clock arrival time.
 - Flagged for the model card: PaySim zeroes destination balances specifically on fraudulent transactions, so balance-based features will likely correlate with `isFraud` more strongly than real bank data would support — a known artifact of the synthetic dataset.
 - Known practical limitation of the current simulator: PaySim's rows are ordered by `step` with ~8,500 rows per simulated hour on average, so at the default `BATCH_SIZE=200`, watermark progress is very slow and 1h/24h velocity windows won't finalize without running a large number of batches. Testing workaround documented in the notebook (temporarily raise `BATCH_SIZE`); a cleaner permanent fix (batching by `step` instead of fixed row count) is a candidate for later polish, not done yet.
+
+## Correction to the Week 2 finding
+While building Week 3, found a real gap in the simulator: `run()` always
+read the CSV from the top on every script invocation, with no memory of
+prior progress. Since the simulator was restarted multiple times during
+Week 1-2 debugging (host typo fix, initial testing), some of the
+"1000 distinct combinations" finding from Week 2 was likely caused by
+this — genuine restart-duplication — not purely PaySim's own value
+collisions as originally documented. Both effects are probably real and
+overlapping; the exact split isn't knowable retroactively from the data
+already ingested. Fixed going forward: the simulator now persists
+`rows_emitted`/`batch_index` to `data/.simulator_state.json` and resumes
+from there on restart, so this won't recur. Added `--reset` to
+intentionally start over when wanted.
+- Verified the streaming feature engineering works end-to-end: row-level features populated (6000 rows), and 1h account velocity windows finalized correctly (14,888 windows) — confirming the watermarked stateful aggregation genuinely works, not just runs without erroring. 24h velocity table remained empty on this run, which is expected (a 24h window needs the watermark to pass ~50 simulated hours before the first window closes) rather than a defect — the same logic that proved out on 1h windows applies directly once the feed runs long enough. Revisit observing a populated 24h table once Week 6 orchestration has the pipeline running continuously.
+
+Week 3 complete.
